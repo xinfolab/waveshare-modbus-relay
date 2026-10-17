@@ -15,6 +15,7 @@ import uvicorn
 from .api import create_api
 from .modbus_client import ModbusClient
 from . import presets
+from . import channel_names
 
 # ── Waveshare Brand Color Palette ───────────────────────────────────
 
@@ -49,7 +50,10 @@ FONT_UI = "Segoe UI"
 class RelayCard(ctk.CTkFrame):
     """Compact horizontal card for a single relay channel."""
 
-    def __init__(self, master, channel: int, on_toggle, on_on, on_off):
+    MAX_NAME_LEN = 20
+
+    def __init__(self, master, channel: int, on_toggle, on_on, on_off,
+                 on_name_change=None):
         super().__init__(
             master,
             fg_color=WS["bg_card"],
@@ -63,15 +67,20 @@ class RelayCard(ctk.CTkFrame):
         self._on_toggle = on_toggle
         self._on_on = on_on
         self._on_off = on_off
+        self._on_name_change = on_name_change
+        self._custom_name = ""
+        self._editing = False
         self.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(
+        # Row 0: CH label, status, buttons
+        self.ch_label = ctk.CTkLabel(
             self,
             text=f"CH {channel}",
             font=ctk.CTkFont(family=FONT_MONO, size=12, weight="bold"),
             text_color=WS["white"],
             width=44,
-        ).grid(row=0, column=0, padx=(8, 2), pady=6)
+        )
+        self.ch_label.grid(row=0, column=0, padx=(8, 2), pady=(6, 0))
 
         self.status = ctk.CTkLabel(
             self,
@@ -80,7 +89,7 @@ class RelayCard(ctk.CTkFrame):
             text_color=WS["led_off"],
             anchor="w",
         )
-        self.status.grid(row=0, column=1, padx=2, pady=6, sticky="w")
+        self.status.grid(row=0, column=1, padx=2, pady=(6, 0), sticky="w")
 
         small_btn_kw = dict(
             width=40,
@@ -99,7 +108,7 @@ class RelayCard(ctk.CTkFrame):
             text_color=WS["green"],
             command=lambda: self._on_on(self.channel),
             **small_btn_kw,
-        ).grid(row=0, column=2, padx=(2, 2), pady=6)
+        ).grid(row=0, column=2, padx=(2, 2), pady=(6, 0))
 
         ctk.CTkButton(
             self,
@@ -111,9 +120,9 @@ class RelayCard(ctk.CTkFrame):
             text_color=WS["red"],
             command=lambda: self._on_off(self.channel),
             **small_btn_kw,
-        ).grid(row=0, column=3, padx=(0, 2), pady=6)
+        ).grid(row=0, column=3, padx=(0, 2), pady=(6, 0))
 
-        self.btn = ctk.CTkButton(
+        ctk.CTkButton(
             self,
             text="TOGGLE",
             width=70,
@@ -124,8 +133,83 @@ class RelayCard(ctk.CTkFrame):
             text_color=WS["bg"],
             corner_radius=5,
             command=lambda: self._on_toggle(self.channel),
+        ).grid(row=0, column=4, padx=(2, 8), pady=(6, 0))
+
+        # Row 1: custom name entry (always present for uniform height)
+        self._name_var = ctk.StringVar()
+        self._name_var.trace_add("write", self._limit_entry)
+
+        self._name_entry = ctk.CTkEntry(
+            self,
+            height=18,
+            font=ctk.CTkFont(family=FONT_UI, size=10),
+            fg_color=WS["bg_card"],
+            border_color=WS["gray_darker"],
+            text_color=WS["white"],
+            border_width=1,
+            corner_radius=3,
+            textvariable=self._name_var,
         )
-        self.btn.grid(row=0, column=4, padx=(2, 8), pady=6)
+        self._name_entry.grid(row=1, column=0, columnspan=5, sticky="ew",
+                              padx=(10, 8), pady=(0, 4))
+        self._name_entry.bind("<Key>", self._block_key)
+        self._name_entry.bind("<Button-1>", self._start_edit)
+        self.ch_label.bind("<Button-1>", self._start_edit)
+
+    def _block_key(self, _event=None):
+        return "break"
+
+    def set_custom_name(self, name: str):
+        self._custom_name = name[:self.MAX_NAME_LEN]
+        self._name_var.set(self._custom_name)
+        if self._custom_name:
+            self.ch_label.configure(text_color=WS["gray"])
+            self._name_entry.configure(border_width=0)
+        else:
+            self.ch_label.configure(text_color=WS["white"])
+            self._name_entry.configure(border_width=1)
+
+    def _limit_entry(self, *_args):
+        val = self._name_var.get()
+        if len(val) > self.MAX_NAME_LEN:
+            self._name_var.set(val[:self.MAX_NAME_LEN])
+
+    def _start_edit(self, _event=None):
+        if self._editing:
+            return
+        self._editing = True
+        self._name_entry.configure(
+            fg_color=WS["gray_darker"], border_color=WS["green"], border_width=1)
+        self._name_entry.unbind("<Key>")
+        self._name_entry.select_range(0, "end")
+        self._name_entry.focus_set()
+        self._name_entry.bind("<Return>", self._confirm_edit)
+        self._name_entry.bind("<Escape>", self._cancel_edit)
+        self._name_entry.bind("<FocusOut>", self._confirm_edit)
+
+    def _finish_edit(self):
+        self._editing = False
+        self._name_entry.bind("<Key>", self._block_key)
+        self._name_entry.unbind("<Return>")
+        self._name_entry.unbind("<Escape>")
+        self._name_entry.unbind("<FocusOut>")
+        name = self._name_var.get().strip()
+        self._name_entry.configure(
+            fg_color=WS["bg_card"], border_color=WS["gray_darker"])
+        self.set_custom_name(name)
+
+    def _confirm_edit(self, _event=None):
+        if not self._editing:
+            return
+        self._finish_edit()
+        if self._on_name_change:
+            self._on_name_change("relay", self.channel, self._custom_name)
+
+    def _cancel_edit(self, _event=None):
+        if not self._editing:
+            return
+        self._name_var.set(self._custom_name)
+        self._finish_edit()
 
     def _update_border(self):
         if self._preview:
@@ -161,7 +245,7 @@ class WaveshareApp(ctk.CTk):
         super().__init__()
 
         self.title("Waveshare Modbus Relay Controller")
-        self.geometry("960x820")
+        self.geometry("960x900")
         self.minsize(800, 700)
         self.configure(fg_color=WS["bg"])
 
@@ -176,7 +260,6 @@ class WaveshareApp(ctk.CTk):
         self.content.pack(fill="both", expand=True, padx=10, pady=(0, 6))
         self.content.grid_columnconfigure(0, weight=1)
 
-        self._selected_preset = None
         self._new_states = [False] * 8
         self._new_ch_btns: list[ctk.CTkButton] = []
 
@@ -187,6 +270,7 @@ class WaveshareApp(ctk.CTk):
         self._build_presets()
         self._build_inputs()
         self._build_log()
+        self._load_channel_names()
 
         self._start_api()
         self._poll()
@@ -308,7 +392,8 @@ class WaveshareApp(ctk.CTk):
 
         self.relay_cards: list[RelayCard] = []
         for i in range(8):
-            card = RelayCard(grid, i, self._toggle_relay, self._relay_on, self._relay_off)
+            card = RelayCard(grid, i, self._toggle_relay, self._relay_on,
+                             self._relay_off, on_name_change=self._on_channel_name_change)
             card.grid(row=i // 4, column=i % 4, padx=3, pady=3, sticky="ew")
             self.relay_cards.append(card)
 
@@ -362,18 +447,51 @@ class WaveshareApp(ctk.CTk):
             row.grid_columnconfigure(c, weight=1)
 
         self.input_leds: list[ctk.CTkLabel] = []
+        self.input_labels: list[ctk.CTkLabel] = []
+        self._input_editing: list[bool] = [False] * 8
+        self._input_names: list[str] = [""] * 8
+        self._input_name_vars: list[ctk.StringVar] = []
+        self._input_name_entries: list[ctk.CTkEntry] = []
+
         for i in range(8):
             cell = ctk.CTkFrame(
                 row, fg_color=WS["bg_card"], corner_radius=6
             )
             cell.grid(row=0, column=i, padx=3, pady=1, sticky="nsew")
 
-            ctk.CTkLabel(
+            in_label = ctk.CTkLabel(
                 cell,
                 text=f"IN {i}",
                 font=ctk.CTkFont(family=FONT_MONO, size=10),
-                text_color=WS["gray"],
-            ).pack(pady=(4, 0))
+                text_color=WS["white"],
+            )
+            in_label.pack(pady=(4, 0))
+            in_label.bind("<Button-1>",
+                          lambda e, ch=i: self._input_start_edit(ch))
+            self.input_labels.append(in_label)
+
+            # Name entry (always present for uniform height)
+            var = ctk.StringVar()
+            var.trace_add("write", lambda *a, c=i: self._input_limit_entry(c))
+            self._input_name_vars.append(var)
+
+            name_entry = ctk.CTkEntry(
+                cell,
+                height=16,
+                font=ctk.CTkFont(family=FONT_UI, size=9),
+                fg_color=WS["bg_card"],
+                border_color=WS["gray_darker"],
+                text_color=WS["white"],
+                border_width=1,
+                corner_radius=3,
+                justify="center",
+                textvariable=var,
+            )
+            name_entry.pack(fill="x", padx=6, pady=(1, 0))
+            name_entry.bind("<Key>", lambda e, c=i: self._input_block_key(c))
+            name_entry.bind("<Button-1>",
+                            lambda e, ch=i: self._input_start_edit(ch))
+            self._input_name_entries.append(name_entry)
 
             led = ctk.CTkLabel(
                 cell,
@@ -383,6 +501,65 @@ class WaveshareApp(ctk.CTk):
             )
             led.pack(pady=(1, 4))
             self.input_leds.append(led)
+
+    _INPUT_MAX_NAME_LEN = 12
+
+    def _input_block_key(self, _ch: int):
+        return "break"
+
+    def _input_set_name(self, ch: int, name: str):
+        name = name[:self._INPUT_MAX_NAME_LEN]
+        self._input_names[ch] = name
+        self._input_name_vars[ch].set(name)
+        if name:
+            self.input_labels[ch].configure(text_color=WS["gray"])
+            self._input_name_entries[ch].configure(border_width=0)
+        else:
+            self.input_labels[ch].configure(text_color=WS["white"])
+            self._input_name_entries[ch].configure(border_width=1)
+
+    def _input_limit_entry(self, ch: int, *_args):
+        val = self._input_name_vars[ch].get()
+        if len(val) > self._INPUT_MAX_NAME_LEN:
+            self._input_name_vars[ch].set(val[:self._INPUT_MAX_NAME_LEN])
+
+    def _input_start_edit(self, ch: int):
+        if self._input_editing[ch]:
+            return
+        self._input_editing[ch] = True
+        entry = self._input_name_entries[ch]
+        entry.configure(
+            fg_color=WS["gray_darker"], border_color=WS["green"], border_width=1)
+        entry.unbind("<Key>")
+        entry.select_range(0, "end")
+        entry.focus_set()
+        entry.bind("<Return>", lambda e, c=ch: self._input_confirm_edit(c))
+        entry.bind("<Escape>", lambda e, c=ch: self._input_cancel_edit(c))
+        entry.bind("<FocusOut>", lambda e, c=ch: self._input_confirm_edit(c))
+
+    def _input_finish_edit(self, ch: int):
+        self._input_editing[ch] = False
+        entry = self._input_name_entries[ch]
+        entry.bind("<Key>", lambda e, c=ch: self._input_block_key(c))
+        entry.unbind("<Return>")
+        entry.unbind("<Escape>")
+        entry.unbind("<FocusOut>")
+        name = self._input_name_vars[ch].get().strip()
+        entry.configure(
+            fg_color=WS["bg_card"], border_color=WS["gray_darker"])
+        self._input_set_name(ch, name)
+
+    def _input_confirm_edit(self, ch: int):
+        if not self._input_editing[ch]:
+            return
+        self._input_finish_edit(ch)
+        channel_names.set_name("input", ch, self._input_names[ch])
+
+    def _input_cancel_edit(self, ch: int):
+        if not self._input_editing[ch]:
+            return
+        self._input_name_vars[ch].set(self._input_names[ch])
+        self._input_finish_edit(ch)
 
     def _build_pulse(self):
         self._section("PULSE CONTROL")
@@ -613,7 +790,6 @@ class WaveshareApp(ctk.CTk):
         if states is None:
             return
 
-        self._selected_preset = name
         for i, dot in enumerate(self.preset_dots):
             dot.configure(text_color=WS["green"] if states[i] else WS["led_off"])
         for i, card in enumerate(self.relay_cards):
@@ -621,7 +797,6 @@ class WaveshareApp(ctk.CTk):
         self._log(f"Preview: {name}")
 
     def _clear_preview(self):
-        self._selected_preset = None
         for card in self.relay_cards:
             card.set_preview(None)
         for dot in self.preset_dots:
@@ -1023,6 +1198,28 @@ class WaveshareApp(ctk.CTk):
         self.log_box.insert("end", f"[{ts}] {msg}\n")
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
+
+    # ── Channel Names ──────────────────────────────────────────
+
+    def _load_channel_names(self):
+        data = channel_names.get_all()
+        for ch_str, name in data.get("relay", {}).items():
+            try:
+                idx = int(ch_str)
+                if 0 <= idx < 8:
+                    self.relay_cards[idx].set_custom_name(name)
+            except (ValueError, IndexError):
+                pass
+        for ch_str, name in data.get("input", {}).items():
+            try:
+                idx = int(ch_str)
+                if 0 <= idx < 8:
+                    self._input_set_name(idx, name)
+            except (ValueError, IndexError):
+                pass
+
+    def _on_channel_name_change(self, kind: str, channel: int, name: str):
+        channel_names.set_name(kind, channel, name)
 
     # ── Cleanup ─────────────────────────────────────────────────
 
